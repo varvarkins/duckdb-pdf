@@ -19,6 +19,7 @@
 ////////////////////////////////////////////////////////////////////////////////
 
 #include "podofo_reader.hpp"
+#include "pdf_layout.hpp"
 
 #include <absl/strings/ascii.h>
 #include <podofo/main/PdfError.h>
@@ -53,6 +54,7 @@ struct PdfBindData final : duckdb::TableFunctionData {
 	uint32_t first_page = 1;
 	uint32_t last_page = std::numeric_limits<uint32_t>::max();
 	bool blocks = false;
+	bool raw = false;
 };
 
 struct PdfState final : duckdb::GlobalTableFunctionState {
@@ -80,6 +82,12 @@ duckdb::unique_ptr<duckdb::FunctionData> PdfBind(duckdb::ClientContext &context,
 		}
 		if (key == "password") {
 			data->password = duckdb::StringValue::Get(value);
+		} else if (key == "layout") {
+			const auto layout = StringUtil::Lower(duckdb::StringValue::Get(value));
+			if (layout != "auto" && layout != "raw") {
+				throw InvalidInputException("read_pdf: layout must be 'auto' or 'raw'");
+			}
+			data->raw = layout == "raw";
 		} else {
 			const auto page = value.GetValue<int64_t>();
 			if (page < 1 || page > std::numeric_limits<uint32_t>::max()) {
@@ -147,13 +155,17 @@ void OpenPdf(duckdb::ClientContext &context, const PdfBindData &bind, PdfState &
 	state.page_loaded = false;
 }
 
-void LoadPdfPage(duckdb::ClientContext &context, PdfState &state) {
+void LoadPdfPage(duckdb::ClientContext &context, const PdfBindData &bind, PdfState &state) {
 	context.InterruptCheck();
 	state.entries.clear();
 	state.entry = 0;
 	auto &page = state.document->GetPages().GetPageAt(state.page);
 	PoDoFo::PdfTextExtractParams params;
 	params.Flags = PoDoFo::PdfTextExtractFlags::ComputeBoundingBox;
+	if (!bind.blocks && !bind.raw) {
+		params.Flags = ::operator|(params.Flags, PoDoFo::PdfTextExtractFlags::TokenizeWords);
+		params.Flags = ::operator|(params.Flags, PoDoFo::PdfTextExtractFlags::RawCoordinates);
+	}
 	params.AbortCheck = [&](const PoDoFo::AbortCheckInfo &) {
 		context.InterruptCheck();
 		return false;
@@ -194,7 +206,7 @@ void PdfScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &input, 
 				continue;
 			}
 			if (!state.page_loaded) {
-				LoadPdfPage(context, state);
+				LoadPdfPage(context, bind, state);
 			}
 			if (bind.blocks && state.entry == state.entries.size()) {
 				++state.page;
@@ -219,11 +231,27 @@ void PdfScan(duckdb::ClientContext &context, duckdb::TableFunctionInput &input, 
 				++state.entry;
 			} else {
 				std::string text;
+				std::vector<LayoutWord> words;
+				const auto page_rect = state.document->GetPages().GetPageAt(state.page).GetRectRaw().GetNormalized();
+				if (!bind.raw) {
+					words.reserve(state.entries.size());
+				}
 				for (const auto &entry : state.entries) {
+					if (!bind.raw) {
+						const auto box =
+						    entry.BoundingBox ? *entry.BoundingBox : PoDoFo::Rect(entry.X, entry.Y, entry.Length, 1.0);
+						words.push_back({box.X - page_rect.X, page_rect.GetTop() - box.GetTop(),
+						                 box.GetRight() - page_rect.X, page_rect.GetTop() - box.Y, box.Height,
+						                 entry.Text});
+						continue;
+					}
 					if (!text.empty()) {
 						text.push_back('\n');
 					}
 					text.append(entry.Text);
+				}
+				if (!bind.raw) {
+					text = LayoutPageText(words, page_rect.Width);
 				}
 				SetPdfString(output.data[2], count, text);
 				duckdb::FlatVector::GetDataMutable<double>(output.data[3])[count] = state.width;
@@ -249,10 +277,13 @@ void LoadInternal(ExtensionLoader &loader) {
 	for (const auto name : {"read_pdf", "read_pdf_blocks"}) {
 		duckdb::FunctionSignature signature;
 		signature.AddPositionalOnly("path", duckdb::LogicalType::VARCHAR)
-		    .WithTypedKwargs("options", [](duckdb::TypedKwargs &options) {
+		    .WithTypedKwargs("options", [name](duckdb::TypedKwargs &options) {
 			    options.Add("password", duckdb::LogicalType::VARCHAR)
 			        .Add("first_page", duckdb::LogicalType::BIGINT)
 			        .Add("last_page", duckdb::LogicalType::BIGINT);
+			    if (std::string_view(name) == "read_pdf") {
+				    options.Add("layout", duckdb::LogicalType::VARCHAR);
+			    }
 		    });
 		loader.RegisterFunction(duckdb::TableFunction {name, std::move(signature), PdfScan, PdfBind, PdfInit});
 	}
