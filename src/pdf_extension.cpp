@@ -2,6 +2,12 @@
 
 #include "pdf_extension.hpp"
 
+#ifdef PDF_USE_PODOFO
+#include "podofo_reader.hpp"
+
+namespace duckdb {
+#else
+
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -10279,6 +10285,8 @@ static void LoadInternal(ExtensionLoader &extension_loader) {
 	pdf_copy.execution_mode = PdfCopyExecutionMode;
 	loader.RegisterFunction(pdf_copy);
 }
+
+#endif
 
 void PdfExtension::Load(ExtensionLoader &loader) {
 	LoadInternal(loader);

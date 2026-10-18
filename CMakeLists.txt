@@ -8,6 +8,12 @@ set(LOADABLE_EXTENSION_NAME ${TARGET_NAME}_loadable_extension)
 
 project(${TARGET_NAME})
 
+option(PDF_USE_PODOFO "Use the PoDoFo text reader backend" OFF)
+if(PDF_USE_PODOFO)
+  include(cmake/podofo.cmake)
+  return()
+endif()
+
 set(CMAKE_CXX_STANDARD
     "17"
     CACHE STRING "C++ standard to enforce")
